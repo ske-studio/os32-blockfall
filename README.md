@@ -4,15 +4,107 @@ OS32 向けの落ち物パズルゲームです。`os32-breakout` で得たビ�
 
 ## MVP
 
-- 10 列 × 20 行の盤面
-- 7 種類の 4 ブロックピース
-- 左右移動 / 回転 / ソフトドロップ / ハードドロップ
-- 接地・固定・ライン消去
-- SCORE / LINES / LEVEL / NEXT
-- GAME OVER / Restart
-- `Esc` で終了
+- [x] 10 列 × 20 行の盤面
+- [x] 7 種類の 4 ブロックピース（I/O/T/S/Z/J/L）
+- [x] 左右移動 / 回転 / ソフトドロップ / ハードドロップ
+- [x] 接地・固定・ライン消去（1-4 行同時）
+- [x] SCORE / LINES / LEVEL / NEXT
+- [x] GAME OVER / Restart
+- [x] `Esc` で終了
+- [ ] ビルド完了
 
 HOLD、ゴースト、BGM/効果音、セーブ、ランキング、ネットワークは MVP に含めません。
+
+## 実装状況
+
+### 完了
+- ゲームロジック（game.c）
+  - ピース生成（7-bag システム）
+  - 衝突判定
+  - 移動・回転（簡易 wall kick）
+  - ハードドロップ
+  - ライン消去
+  - スコア計算
+  - ネクストピース表示
+
+- 入力処理（input.c）
+  - held input（左右移動、ソフトドロップ）
+  - edge detection（回転、ハードドロップ、リスタート）
+  - DAS/ARR ゲーム側制御
+
+- 描画（game.c）
+  - プレイエリア・ステータスパネル
+  - 盤面・ピース・ネクスト表示
+  - READY/GAME OVER オーバーレイ
+
+### 残務
+- ビルド警告修正
+  - `snprintf` の include
+  - `get_piece_shape` の型不一致
+  - 定数の重複定義
+
+## 画面
+
+OS32 の 640×400 画面を使用します。
+
+```text
+640x400
+
+   PLAY AREA 240x320              STATUS
+  +----------------------+       +----------------------+
+  |    +----------+      |       | BLOCKFALL            |
+  |    | 10 x 20  |      |       |                      |
+  |    |          |      |       | SCORE                |
+  |    |          |      |       | 000000               |
+  |    |          |      |       |                      |
+  |    |          |      |       | LINES                |
+  |    |          |      |       | 000                  |
+  |    |          |      |       |                      |
+  |    |          |      |       | LEVEL                |
+  |    |          |      |       | 01                   |
+  |    |          |      |       |                      |
+  |    +----------+      |       | NEXT                 |
+  +----------------------+       +----------------------+
+```
+
+## 入力方針
+
+OS32 Breakout で文字入力の OS リピート依存が問題になったため、本ゲームは key state と edge detection を基本とする。
+
+- Left / A     move left
+- Right / D    move right
+- Down / S     soft drop
+- Up / X       rotate clockwise
+- Z            rotate counter-clockwise
+- Space        hard drop / READY start
+- R            restart on GAME_OVER
+- Esc          exit
+
+## Build
+
+OS32 SDK を先に生成してください。
+
+```sh
+cd ../os32
+make sdk
+
+cd ../os32-blockfall
+make
+```
+
+SDK の場所が異なる場合:
+
+```sh
+make OS32_SDK=/path/to/os32/build/sdk
+```
+
+生成物:
+
+```text
+build/blockfall.bin
+```
+
+詳細は `docs/SPEC.md`, `docs/AI_TASK.md`, `docs/TEST_PLAN.md` を参照してください。
 
 ## 画面
 
