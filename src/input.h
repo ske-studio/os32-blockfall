@@ -1,55 +1,61 @@
 #ifndef INPUT_H
 #define INPUT_H
 
-#include <stdint.h>
+#include "common.h"
+#include "os32api.h"
 
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
+/* PC-98 key codes (mirror of os32 drivers/kbd.h) */
+#define KEY_ESC    0x00
+#define KEY_R      0x13
+#define KEY_A      0x1D
+#define KEY_S      0x1E
+#define KEY_D      0x1F
+#define KEY_Z      0x29
+#define KEY_X      0x2A
+#define KEY_SPACE  0x34
+#define KEY_UP     0x3A
+#define KEY_LEFT   0x3B
+#define KEY_RIGHT  0x3C
+#define KEY_DOWN   0x3D
 
-/* Key scancodes */
-#define SC_LEFT 0x25
-#define SC_RIGHT 0x27
-#define SC_DOWN 0x28
-#define SC_UP 0x26
-#define SC_Z 0x32
-#define SC_X 0x2E
-#define SC_SPACE 0x39
-#define SC_R 0x31
-#define SC_ESCAPE 0x01
+/* Horizontal auto-repeat (SPEC§9) */
+#define DAS_TICKS  15
+#define ARR_TICKS  4
 
-/* Input state */
 typedef struct {
-    u8 left_pressed;
-    u8 right_pressed;
-    u8 down_pressed;
-    u8 up_pressed;
-    u8 z_pressed;
-    u8 x_pressed;
-    u8 space_pressed;
-    u8 r_pressed;
-    u8 escape_pressed;
-    
-    /* DAS/ARR timers for held movement */
-    u32 left_repeat_timer;
-    u32 right_repeat_timer;
-    u32 repeat_interval;
-    u32 repeat_delay;
+    /* held state (this tick) */
+    u8 left;       /* Left / A */
+    u8 right;      /* Right / D */
+    u8 down;       /* Down / S  (soft drop) */
+
+    /* edge state (this tick: current && !prev) */
+    u8 rotate_cw;   /* Up / X */
+    u8 rotate_ccw;  /* Z */
+    u8 space;       /* Space: start (READY) / hard drop (PLAYING) */
+    u8 restart;     /* R */
+    u8 escape;      /* Esc */
+
+    /* previous held, for edge detection */
+    u8 p_rotate_cw;
+    u8 p_rotate_ccw;
+    u8 p_space;
+    u8 p_restart;
+    u8 p_escape;
+
+    /* DAS / ARR */
+    s8 auto_dir;
+    u8 das_timer;
+    u8 arr_timer;
+    u8 das;
+    u8 arr;
 } InputState;
 
-/* Initialize input state */
 void input_init(InputState *state);
 
-/* Process keyboard input, returns 1 if key pressed */
-int input_poll(InputState *state, int ch);
+/* Sample held keys via kbd_is_pressed() and compute edges. Call once per tick. */
+void input_update(InputState *state, KernelAPI *api);
 
-/* Check if key is currently held down */
-int input_is_held(InputState *state, int scancode);
-
-/* Get repeat timer for left movement */
-u32 input_get_left_repeat_timer(InputState *state);
-
-/* Get repeat timer for right movement */
-u32 input_get_right_repeat_timer(InputState *state);
+/* Horizontal auto-repeat step for this tick: -1 / 0 / +1 */
+s8 input_horizontal_move(InputState *state);
 
 #endif /* INPUT_H */

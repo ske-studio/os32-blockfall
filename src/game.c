@@ -2,11 +2,15 @@
 #include "libos32gfx.h"
 #include <stdio.h>
 
-/* Simple pseudo-random number generator (xorshift32) */
-static u32 rng_state = 1;
+/* ======================================================================== */
+/*  RNG (xorshift32)                                                        */
+/* ======================================================================== */
+
+static u32 rng_state;
 
 static void rng_seed(u32 seed)
 {
+    /* 0 -> 1 に補正しないと xorshift が 0 に固まる */
     if (seed == 0) seed = 1;
     rng_state = seed;
 }
@@ -19,267 +23,267 @@ static u32 rng_next(void)
     return rng_state;
 }
 
-/* Shuffle array using Fisher-Yates */
-static void shuffle(u8 *arr, u8 count)
-{
-    u8 i;
-    for (i = count; i > 1; i--) {
-        u32 j = rng_next() % (i + 1);
-        u8 tmp = arr[i - 1];
-        arr[i - 1] = arr[j];
-        arr[j] = tmp;
-    }
-}
+/* ======================================================================== */
+/*  Piece definitions (4x4 local grid, x right / y down)                    */
+/* ======================================================================== */
 
-/* Piece shapes (4x4 grid, bitmasks per row) */
-static const u8 PIECE_SHAPES[7][4][4] = {
-    {{0x0F, 0x0F, 0x0F, 0x0F}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}},
-    {{0x3C, 0x3C, 0x00, 0x00}, {0x3C, 0x3C, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}},
-    {{0x06, 0x06, 0x06, 0x00}, {0x00, 0x3C, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}},
-    {{0x30, 0x3C, 0x00, 0x00}, {0x06, 0x06, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}},
-    {{0x06, 0x06, 0x00, 0x00}, {0x30, 0x3C, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}},
-    {{0x1E, 0x00, 0x00, 0x00}, {0x3C, 0x3C, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}},
-    {{0x00, 0x06, 0x00, 0x00}, {0x00, 0x3C, 0x3C, 0x00}, {0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00}}
+typedef struct {
+    s8 x;
+    s8 y;
+} Cell;
+
+/* PIECE_CELLS[type-1][rot][cell] — precomputed for all 4 rotations. */
+static const Cell PIECE_CELLS[PIECE_COUNT][4][4] = {
+    /* 1: I */
+    {
+        {{0,1},{1,1},{2,1},{3,1}},
+        {{2,0},{2,1},{2,2},{2,3}},
+        {{0,2},{1,2},{2,2},{3,2}},
+        {{1,0},{1,1},{1,2},{1,3}},
+    },
+    /* 2: O */
+    {
+        {{1,1},{2,1},{1,2},{2,2}},
+        {{1,1},{2,1},{1,2},{2,2}},
+        {{1,1},{2,1},{1,2},{2,2}},
+        {{1,1},{2,1},{1,2},{2,2}},
+    },
+    /* 3: T */
+    {
+        {{1,0},{0,1},{1,1},{2,1}},
+        {{2,0},{2,1},{2,2},{3,1}},
+        {{2,3},{1,2},{2,2},{3,2}},
+        {{1,1},{1,2},{1,3},{0,2}},
+    },
+    /* 4: S */
+    {
+        {{1,0},{2,0},{0,1},{1,1}},
+        {{2,0},{2,1},{3,1},{3,2}},
+        {{3,2},{2,2},{1,3},{2,3}},
+        {{0,1},{0,2},{1,2},{1,3}},
+    },
+    /* 5: Z */
+    {
+        {{0,0},{1,0},{1,1},{2,1}},
+        {{3,0},{3,1},{2,1},{2,2}},
+        {{3,3},{2,3},{2,2},{1,2}},
+        {{0,3},{0,2},{1,2},{1,1}},
+    },
+    /* 6: J */
+    {
+        {{0,0},{0,1},{1,1},{2,1}},
+        {{3,0},{2,0},{2,1},{2,2}},
+        {{3,3},{3,2},{2,2},{1,2}},
+        {{0,3},{1,3},{1,2},{1,1}},
+    },
+    /* 7: L */
+    {
+        {{2,0},{0,1},{1,1},{2,1}},
+        {{3,2},{2,0},{2,1},{2,2}},
+        {{1,3},{3,2},{2,2},{1,2}},
+        {{0,1},{1,3},{1,2},{1,1}},
+    },
 };
 
-/* Get piece shape based on type and rotation */
-static const u8 *get_piece_shape(u8 type, u8 rot)
-{
-    const u8 (*shape)[4][4] = PIECE_SHAPES + (type - 1);
-    
-    /* Rotate the shape matrix */
-    if (rot == 0) return (const u8 *)shape[0];
-    
-    /* Create rotated version on stack */
-    static u8 buffer[4][4];
-    int r, c;
-    for (r = 0; r < 4; r++) {
-        for (c = 0; c < 4; c++) {
-            if (rot == 1) {
-                /* CW: (x, y) -> (-y, x) */
-                buffer[r][c] = shape[c][3 - r][0];
-            } else if (rot == 2) {
-                /* 180: (x, y) -> (-x, -y) */
-                buffer[r][c] = shape[3 - r][3 - c][0];
-            } else if (rot == 3) {
-                /* CCW: (x, y) -> (y, -x) */
-                buffer[r][c] = shape[3 - c][r][0];
-            } else {
-                buffer[r][c] = shape[r][c][0];
-            }
-        }
-    }
-    return (const u8 *)buffer;
-}
+static const u8 PIECE_COLORS[PIECE_COUNT] = {1, 2, 3, 4, 5, 6, 7};
 
-/* Get bounding box of piece at given position and rotation */
-static void get_piece_bbox(const u8 (*shape)[4][4], s8 x, s8 y, s8 *minx, s8 *miny, s8 *maxx, s8 *maxy)
-{
-    *minx = 10;
-    *miny = 10;
-    *maxx = -10;
-    *maxy = -10;
-    
-    int r, c;
-    for (r = 0; r < 4; r++) {
-        for (c = 0; c < 4; c++) {
-            if ((*shape)[r][c] & 1) {
-                s8 px = x + c;
-                s8 py = y + r;
-                if (px < *minx) *minx = px;
-                if (px > *maxx) *maxx = px;
-                if (py < *miny) *miny = py;
-                if (py > *maxy) *maxy = py;
-            }
-        }
-    }
-}
+/* Wall kick offsets, in the order from SPEC§5 */
+static const s8 KICKS[6][2] = {
+    {0, 0}, {-1, 0}, {1, 0}, {-2, 0}, {2, 0}, {0, -1},
+};
 
-/* Check collision for piece at position */
-static int check_collision(const Game *game, const Piece *piece)
+/* ======================================================================== */
+/*  Collision / 7-bag helpers                                               */
+/* ======================================================================== */
+
+static int piece_collides(const Game *game, const Piece *piece)
 {
-    const u8 (*shape)[4][4] = PIECE_SHAPES + (piece->type - 1);
-    s8 y, x;
-    
-    /* Check all 4x4 cells of the piece */
-    for (y = 0; y < 4; y++) {
-        for (x = 0; x < 4; x++) {
-            if ((*shape)[y][x] & 1) {
-                s8 board_y = piece->y + y;
-                s8 board_x = piece->x + x;
-                
-                /* Check bounds */
-                if (board_x < 0 || board_x >= BOARD_W || board_y >= BOARD_H) {
-                    return 1;
-                }
-                /* Check board collision */
-                if (board_y >= 0 && game->board[board_y][board_x] != 0) {
-                    return 1;
-                }
-            }
-        }
+    const Cell *cells = PIECE_CELLS[piece->type - 1][piece->rot & 3];
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        int bx = piece->x + cells[i].x;
+        int by = piece->y + cells[i].y;
+
+        if (bx < 0 || bx >= BOARD_W || by >= BOARD_H) return 1;
+        if (by >= 0 && game->board[by][bx] != 0) return 1;
     }
     return 0;
 }
 
-void game_init(Game *game)
+static void bag_fill(Game *game)
 {
-    rng_seed(12345);
+    int i;
+
+    for (i = 0; i < PIECE_COUNT; i++) game->bag[i] = (u8)(i + 1);
+    for (i = PIECE_COUNT - 1; i > 0; i--) {
+        u32 j = rng_next() % (u32)(i + 1);
+        u8 t = game->bag[i];
+        game->bag[i] = game->bag[j];
+        game->bag[j] = t;
+    }
+    game->bag_pos = 0;
+}
+
+static u8 bag_take(Game *game)
+{
+    if (game->bag_pos >= PIECE_COUNT) bag_fill(game);
+    return game->bag[game->bag_pos++];
+}
+
+/* ======================================================================== */
+/*  Public API                                                              */
+/* ======================================================================== */
+
+void game_init(Game *game, u32 seed)
+{
+    int y, x;
+
+    rng_seed(seed);
     game->score = 0;
     game->lines = 0;
     game->level = 1;
     game->mode = GAME_READY;
     game->gravity_ticks = 0;
     game->soft_drop_ticks = 0;
-    game->lock_delay_ticks = 0;
-    
-    int y, x;
+
     for (y = 0; y < BOARD_H; y++) {
         for (x = 0; x < BOARD_W; x++) {
             game->board[y][x] = 0;
         }
     }
+
+    bag_fill(game);
+    game->next_piece.type = bag_take(game);
+    game->next_piece.rot = 0;
+    game->next_piece.color = PIECE_COLORS[game->next_piece.type - 1];
+
+    game->active.type = 0;
+    game->active.rot = 0;
+    game->active.x = 0;
+    game->active.y = 0;
+    game->active.color = 0;
 }
 
 void game_reset(Game *game)
 {
-    game_init(game);
+    game_init(game, rng_next());
+}
+
+int game_start(Game *game)
+{
+    if (game->mode != GAME_READY) return -1;
+    game->mode = GAME_PLAYING;
+    return game_spawn_piece(game);
 }
 
 int game_spawn_piece(Game *game)
 {
-    u8 types[PIECE_COUNT];
-    u8 i;
-    for (i = 0; i < PIECE_COUNT; i++) {
-        types[i] = i + 1;
-    }
-    shuffle(types, PIECE_COUNT);
-    
-    game->next_piece.type = types[0];
-    game->next_piece.rot = 0;
-    
-    /* Spawn at top center */
-    game->active.type = types[1];
-    game->active.rot = 0;
+    game->active = game->next_piece;
     game->active.x = 3;
     game->active.y = 0;
-    game->active.color = PIECE_COLORS[game->active.type - 1];
-    
-    /* Check if spawn position is valid */
-    if (check_collision(game, &game->active)) {
+    game->gravity_ticks = 0;
+    game->soft_drop_ticks = 0;
+
+    /* Prepare the new NEXT */
+    game->next_piece.type = bag_take(game);
+    game->next_piece.rot = 0;
+    game->next_piece.color = PIECE_COLORS[game->next_piece.type - 1];
+
+    if (piece_collides(game, &game->active)) {
         game->mode = GAME_OVER;
         return -1;
     }
-    
     return 0;
 }
 
 int game_is_valid(const Game *game, const Piece *piece)
 {
-    return !check_collision(game, piece);
+    return !piece_collides(game, piece);
 }
 
 int game_move_piece(Game *game, s8 dx, s8 dy)
 {
+    Piece np;
+
     if (game->mode != GAME_PLAYING) return 0;
-    
-    Piece new_piece = game->active;
-    new_piece.x += dx;
-    new_piece.y += dy;
-    
-    if (!check_collision(game, &new_piece)) {
-        game->active = new_piece;
-        return 1;
-    }
-    return 0;
+
+    np = game->active;
+    np.x += dx;
+    np.y += dy;
+
+    if (piece_collides(game, &np)) return 0;
+
+    game->active = np;
+    return 1;
 }
 
 int game_rotate_piece(Game *game, int clockwise)
 {
+    Piece np;
+    int k;
+
     if (game->mode != GAME_PLAYING) return 0;
-    
-    Piece new_piece = game->active;
-    new_piece.rot += clockwise ? 1 : -1;
-    if (new_piece.rot < 0) new_piece.rot += 4;
-    if (new_piece.rot >= 4) new_piece.rot -= 4;
-    
-    /* Try wall kicks */
-    s8 kick;
-    
-    for (kick = WALL_KICKS[0]; kick <= WALL_KICKS[6]; kick++) {
-        new_piece.x += kick;
-        if (!check_collision(game, &new_piece)) {
-            game->active = new_piece;
+    if (game->active.type == 2) return 1;   /* O piece: no visible rotation */
+
+    np = game->active;
+    if (clockwise) np.rot = (u8)((np.rot + 1) & 3);
+    else           np.rot = (u8)((np.rot + 3) & 3);
+
+    for (k = 0; k < 6; k++) {
+        Piece trial = np;
+        trial.x += KICKS[k][0];
+        trial.y += KICKS[k][1];
+        if (!piece_collides(game, &trial)) {
+            game->active = trial;
             return 1;
         }
-        new_piece.x -= kick;
     }
-    
     return 0;
 }
 
 int game_hard_drop(Game *game)
 {
     if (game->mode != GAME_PLAYING) return 0;
-    
-    while (!check_collision(game, &game->active)) {
-        game->active.y++;
+
+    while (game_move_piece(game, 0, 1)) {
     }
-    game->active.y--;
-    
-    /* Lock immediately after hard drop */
+
     game_lock_piece(game);
     return 1;
 }
 
 void game_lock_piece(Game *game)
 {
-    const u8 (*shape)[4][4] = PIECE_SHAPES + (game->active.type - 1);
-    
-    int r, c;
-    for (r = 0; r < 4; r++) {
-        for (c = 0; c < 4; c++) {
-            if ((*shape)[r][c] & 1) {
-                s8 y = game->active.y + r;
-                s8 x = game->active.x + c;
-                
-                if (y >= 0 && y < BOARD_H && x >= 0 && x < BOARD_W) {
-                    game->board[y][x] = game->active.color;
-                }
-            }
+    const Cell *cells = PIECE_CELLS[game->active.type - 1][game->active.rot & 3];
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        int bx = game->active.x + cells[i].x;
+        int by = game->active.y + cells[i].y;
+
+        if (bx >= 0 && bx < BOARD_W && by >= 0 && by < BOARD_H) {
+            game->board[by][bx] = game->active.color;
         }
     }
-    
-    /* Clear active piece */
+
     game->active.type = 0;
     game->active.rot = 0;
     game->active.x = 0;
     game->active.y = 0;
     game->active.color = 0;
-    
-    /* Check for game over */
-    if (game->board[0][0] != 0) {
-        game->mode = GAME_OVER;
-        return;
+
+    {
+        int cleared = game_clear_lines(game);
+
+        if (cleared > 0) {
+            static const u32 BASE_SCORE[5] = {0, 100, 300, 500, 800};
+            game->score += BASE_SCORE[cleared] * game->level;
+            game->lines += (u16)cleared;
+            game->level = (u8)(game->lines / 10 + 1);
+        }
     }
-    
-    /* Clear lines */
-    int cleared = game_clear_lines(game);
-    
-    if (cleared > 0) {
-        /* Update score */
-        u32 points = 0;
-        if (cleared == 1) points = 100;
-        else if (cleared == 2) points = 300;
-        else if (cleared == 3) points = 500;
-        else if (cleared == 4) points = 800;
-        
-        game->score += points * game->level;
-        game->lines += cleared;
-        game->level = game->lines / 10 + 1;
-    }
-    
-    /* Spawn next piece */
+
     if (game_spawn_piece(game) < 0) {
         game->mode = GAME_OVER;
     }
@@ -287,145 +291,152 @@ void game_lock_piece(Game *game)
 
 int game_clear_lines(Game *game)
 {
-    int lines_to_clear[BOARD_H];
-    int count = 0;
-    
-    int y, x, i, j;
-    for (y = BOARD_H - 1; y >= 0; y--) {
+    int src, dst, x;
+    int cleared = 0;
+
+    dst = BOARD_H - 1;
+    for (src = BOARD_H - 1; src >= 0; src--) {
         int full = 1;
+
         for (x = 0; x < BOARD_W; x++) {
-            if (game->board[y][x] == 0) {
+            if (game->board[src][x] == 0) {
                 full = 0;
                 break;
             }
         }
         if (full) {
-            lines_to_clear[count++] = y;
+            cleared++;
+            continue;
         }
-    }
-    
-    if (count == 0) return 0;
-    
-    /* Shift rows down */
-    int write_pos = count;
-    for (i = count - 1; i >= 0; i--) {
-        int src = lines_to_clear[i];
-        for (j = src + 1; j < write_pos; j++) {
-            game->board[j][0] = game->board[j - 1][0];
-            for (x = 1; x < BOARD_W; x++) {
-                game->board[j][x] = game->board[j - 1][x];
+        if (dst != src) {
+            for (x = 0; x < BOARD_W; x++) {
+                game->board[dst][x] = game->board[src][x];
             }
         }
-        /* Clear top row */
-        for (x = 0; x < BOARD_W; x++) {
-            game->board[0][x] = 0;
-        }
-        write_pos--;
+        dst--;
     }
-    
-    return count;
+    for (; dst >= 0; dst--) {
+        for (x = 0; x < BOARD_W; x++) {
+            game->board[dst][x] = 0;
+        }
+    }
+    return cleared;
 }
 
 u32 game_get_gravity_ticks(u8 level)
 {
-    /* Fall speed: 50 ticks/cell at level 1, faster as level increases */
-    u32 ticks = 50 - (level - 1) * 5;
+    u32 ticks = 50 - (u32)(level - 1) * 5;
     return ticks > 5 ? ticks : 5;
 }
 
-void game_draw_block(u16 x, u16 y, u8 color)
+/* ======================================================================== */
+/*  Rendering                                                               */
+/* ======================================================================== */
+
+static void draw_block(int px, int py, u8 color)
 {
-    /* Draw block with 1px border */
-    gfx_rect(x, y, CELL_W - 1, CELL_H - 1, color);
-    gfx_fill_rect(x + 1, y + 1, CELL_W - 3, CELL_H - 3, color);
+    gfx_rect(px, py, CELL_W - 1, CELL_H - 1, color);
+    gfx_fill_rect(px + 1, py + 1, CELL_W - 3, CELL_H - 3, color);
 }
 
-void game_render(Game *game)
+static void draw_board(const Game *game)
 {
-    /* Clear screen */
-    gfx_clear(0);
-    
-    /* Draw play area frame */
-    gfx_rect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H, 7);
-    
-    /* Draw board background */
-    gfx_fill_rect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, 15);
-    
-    /* Draw settled blocks */
     int y, x;
+
     for (y = 0; y < BOARD_H; y++) {
         for (x = 0; x < BOARD_W; x++) {
             if (game->board[y][x] != 0) {
-                game_draw_block(BOARD_X + x * CELL_W, BOARD_Y + y * CELL_H, game->board[y][x]);
+                draw_block(BOARD_PIX_X + x * CELL_W,
+                           BOARD_PIX_Y + y * CELL_H, game->board[y][x]);
             }
         }
     }
-    
-    /* Draw active piece */
-    if (game->active.type != 0 && game->mode == GAME_PLAYING) {
-        const u8 (*shape)[4] = get_piece_shape(game->active.type, game->active.rot);
-        int r, c;
-        for (r = 0; r < 4; r++) {
-            for (c = 0; c < 4; c++) {
-                if ((shape[r][c] >> 0) & 1) {
-                    s8 y = game->active.y + r;
-                    s8 x = game->active.x + c;
-                    if (y >= 0 && y < BOARD_H && x >= 0 && x < BOARD_W) {
-                        game_draw_block(BOARD_X + x * CELL_W, BOARD_Y + y * CELL_H, game->active.color);
-                    }
-                }
-            }
+}
+
+static void draw_active(const Game *game)
+{
+    const Cell *cells;
+    int i;
+
+    if (game->active.type == 0 || game->mode != GAME_PLAYING) return;
+
+    cells = PIECE_CELLS[game->active.type - 1][game->active.rot & 3];
+    for (i = 0; i < 4; i++) {
+        int bx = game->active.x + cells[i].x;
+        int by = game->active.y + cells[i].y;
+
+        if (bx >= 0 && bx < BOARD_W && by >= 0 && by < BOARD_H) {
+            draw_block(BOARD_PIX_X + bx * CELL_W,
+                       BOARD_PIX_Y + by * CELL_H, game->active.color);
         }
     }
-    
-    /* Draw status panel */
-    gfx_fill_rect(BOARD_X + BOARD_W + 10, PLAY_Y, 200, 320, 14);
-    
+}
+
+static void draw_text_num(int x, int y, const char *label, u32 value)
+{
+    char buf[16];
+
     kcg_set_scale(1);
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 16, "BLOCKFALL", 15, 0);
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 56, "SCORE", 7, 0);
-    
-    char score_buf[16];
-    snprintf(score_buf, sizeof(score_buf), "%u", game->score);
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 80, score_buf, 15, 0);
-    
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 120, "LINES", 7, 0);
-    char lines_buf[16];
-    snprintf(lines_buf, sizeof(lines_buf), "%u", game->lines);
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 144, lines_buf, 15, 0);
-    
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 184, "LEVEL", 7, 0);
-    char level_buf[16];
-    snprintf(level_buf, sizeof(level_buf), "%u", game->level);
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 208, level_buf, 15, 0);
-    
-    kcg_draw_utf8(BOARD_X + BOARD_W + 20, PLAY_Y + 248, "NEXT", 7, 0);
-    
-    /* Draw next piece preview */
-    if (game->next_piece.type != 0) {
-        gfx_fill_rect(BOARD_X + BOARD_W + 20, PLAY_Y + 272, 160, 64, 13);
-        const u8 (*shape)[4] = get_piece_shape(game->next_piece.type, 0);
-        int r, c;
-        for (r = 0; r < 4; r++) {
-            for (c = 0; c < 4; c++) {
-                if ((shape[r][c] >> 0) & 1) {
-                    gfx_fill_rect(BOARD_X + BOARD_W + 48 + c * 12, PLAY_Y + 288 + r * 12, 10, 10, game->next_piece.color);
-                }
-            }
-        }
+    kcg_draw_utf8(x, y, label, 7, 0);
+    snprintf(buf, sizeof(buf), "%u", (unsigned int)value);
+    kcg_draw_utf8(x, y + 24, buf, 15, 0);
+}
+
+static void draw_status(const Game *game)
+{
+    kcg_set_scale(1);
+    gfx_fill_rect(STATUS_X, PLAY_Y, STATUS_W, PLAY_H, 14);
+    kcg_draw_utf8(STATUS_X + 10, PLAY_Y + 16, "BLOCKFALL", 15, 0);
+    draw_text_num(STATUS_X + 10, PLAY_Y + 56, "SCORE", game->score);
+    draw_text_num(STATUS_X + 10, PLAY_Y + 120, "LINES", game->lines);
+    draw_text_num(STATUS_X + 10, PLAY_Y + 184, "LEVEL", game->level);
+    kcg_set_scale(1);
+    kcg_draw_utf8(STATUS_X + 10, PLAY_Y + 248, "NEXT", 7, 0);
+}
+
+static void draw_next(const Game *game)
+{
+    const Cell *cells;
+    int i;
+
+    if (game->next_piece.type == 0) return;
+
+    gfx_fill_rect(STATUS_X + 10, PLAY_Y + 272, 160, 64, 13);
+    cells = PIECE_CELLS[game->next_piece.type - 1][0];
+    for (i = 0; i < 4; i++) {
+        gfx_fill_rect(STATUS_X + 38 + cells[i].x * 12,
+                      PLAY_Y + 288 + cells[i].y * 12,
+                      10, 10, game->next_piece.color);
     }
-    
-    /* Draw mode overlay */
+}
+
+static void draw_overlay(const Game *game)
+{
+    kcg_set_scale(1);
+
     if (game->mode == GAME_READY) {
         gfx_fill_rect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H, 1);
-        kcg_set_scale(1);
-        kcg_draw_utf8(BOARD_X + 40, BOARD_Y + 120, "PRESS SPACE", 14, 0);
+        kcg_draw_utf8(BOARD_PIX_X + 40, BOARD_PIX_Y + 120, "PRESS SPACE", 14, 0);
     } else if (game->mode == GAME_OVER) {
         gfx_fill_rect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H, 1);
-        kcg_set_scale(1);
-        kcg_draw_utf8(BOARD_X + 40, BOARD_Y + 80, "GAME OVER", 15, 0);
-        kcg_draw_utf8(BOARD_X + 40, BOARD_Y + 120, "Press R to restart", 14, 0);
+        kcg_draw_utf8(BOARD_PIX_X + 40, BOARD_PIX_Y + 80, "GAME OVER", 15, 0);
+        kcg_draw_utf8(BOARD_PIX_X + 40, BOARD_PIX_Y + 120, "Press R to restart", 14, 0);
     }
-    
+}
+
+void game_render(const Game *game)
+{
+    gfx_clear(0);
+
+    /* Play area frame + board background */
+    gfx_rect(PLAY_X, PLAY_Y, PLAY_W, PLAY_H, 7);
+    gfx_fill_rect(BOARD_PIX_X, BOARD_PIX_Y, BOARD_PIX_W, BOARD_PIX_H, 15);
+
+    draw_board(game);
+    draw_active(game);
+    draw_status(game);
+    draw_next(game);
+    draw_overlay(game);
+
     gfx_present();
 }
